@@ -81,6 +81,33 @@ export interface ReviewExclusion {
   repository: RepositoryId;
   url: string;
   reason: ReviewExclusionReason;
+  /**
+   * Bounded shared-credit candidate for co-attributed review awards. Present
+   * only when `co-attributed-review-award` records a displaced reviewer whose
+   * finding the merged outcome answered. The candidate keeps attribution
+   * auditable without changing score: `automaticAward` stays at one third and
+   * a maintainer can later ratify explicit integer-third shares.
+   */
+  coAttributionCandidate?: ReviewCoAttributionCandidate;
+}
+
+/**
+ * Shared-credit candidate published for a pull request where more than one
+ * reviewer independently answered a blocker. Describes which review received
+ * the single automatic award, why it was ordered that way, and which reviewers
+ * were displaced, so the selection is independently auditable.
+ */
+export interface ReviewCoAttributionCandidate {
+  /** Reviews that independently answered the blocker, ordered by tie-breaker. */
+  candidateReviewIds: string[];
+  /** Review that received the single automatic one-third award. */
+  selectedReviewId: string;
+  /** Reviews recorded as co-attributed but not awarded. */
+  displacedReviewIds: string[];
+  /** Plain-language reason the ordering and selection were applied. */
+  orderingReason: string;
+  /** Automatic credit granted to the work unit. Never exceeds one third. */
+  automaticAwardScoreThirds: 1;
 }
 
 export interface PullRequestRecord {

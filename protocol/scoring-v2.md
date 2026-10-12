@@ -63,9 +63,17 @@ Before 2026-10-01T00:00:00Z, every reviewer's first qualifying pre-merge
 that instant (PRD SCR-05), an ordinary formal review scores only when it
 changed the accepted outcome: a `CHANGES_REQUESTED` review of a commit that is
 not the merged head. One merged pull request gives at most one ordinary review
-award, triage credit, to the latest such review. Approvals, requests the merge
-ignored, and reviews without a recorded commit publish `unchanged-outcome`;
-other qualifying reviews publish `pull-request-review-awarded`. Higher review
+award, triage credit. The award goes to the earliest such review, so a late
+restatement cannot displace the reviewer who found the blocker first. Approvals,
+requests the merge ignored, and reviews without a recorded commit publish
+`unchanged-outcome`. A repeat by the already-awarded actor publishes
+`pull-request-review-awarded` and stays one lifecycle per actor. A qualifying
+review by a different actor than the awarded reviewer publishes
+`co-attributed-review-award` with a bounded shared-credit candidate that records
+the candidate review IDs, the selected recipient, the displaced candidates, the
+ordering reason, and the automatic award. The candidate does not increase
+score: automatic ordinary review credit for one pull request stays at one third,
+and a maintainer can later ratify explicit integer-third shares. Higher review
 tiers still come only from maintainer-ratified review records or evaluated
 contributions.
 

@@ -28,6 +28,7 @@ import type {
   PullRequestRecord,
   PullRequestReview,
   ReviewExclusion,
+  ReviewCoAttributionCandidate,
   ReviewExclusionReason,
   ScoreCategory,
   ScoreEvent,
@@ -69,6 +70,7 @@ export type {
   PullRequestRecord,
   PullRequestReview,
   ReviewExclusion,
+  ReviewCoAttributionCandidate,
   ReviewExclusionReason,
   ScoreCategory,
   ScoreEvent,
@@ -1445,7 +1447,7 @@ export function leaderboardMethodology(): LeaderboardMethodology {
           "triage 1/3; standard 1; deep reproduction 3; specialist 8; ratification 1/3",
         cap: "from 2026-10-01, one ordinary review award per merged pull request; no self-review and no duplicate reviewer credit on one artifact",
         qualification:
-          "Every merged pull request with a formal review is selected through a separate bounded review census, independent of the pull-request author's detail cap. A pre-merge APPROVED or CHANGES_REQUESTED review of human-authored work has substantive text or inline discussion. Before 2026-10-01 such a review scores standard credit. From 2026-10-01 only the latest CHANGES_REQUESTED review on a commit other than the merged head scores, at triage credit; approvals and ignored requests do not. Higher review tiers require maintainer ratification. Excluded formal reviews publish a machine-readable reason.",
+          "Every merged pull request with a formal review is selected through a separate bounded review census, independent of the pull-request author's detail cap. A pre-merge APPROVED or CHANGES_REQUESTED review of human-authored work has substantive text or inline discussion. Before 2026-10-01 such a review scores standard credit. From 2026-10-01 only the earliest CHANGES_REQUESTED review on a commit other than the merged head scores, at triage credit, so a late restatement cannot displace the reviewer who found the blocker first; approvals and ignored requests do not. Other qualifying reviews publish pull-request-review-awarded or co-attributed-review-award, and a co-attributed exclusion carries a bounded shared-credit candidate that records the candidates, the selected recipient, the displaced reviewers, and the ordering reason without increasing score. Higher review tiers require maintainer ratification. Excluded formal reviews publish a machine-readable reason.",
       },
       {
         id: "evaluated-contribution",
@@ -2683,6 +2685,7 @@ export function createLeaderboardSnapshot(
     pullRequest: MergedPullRequestReviewRecord,
     review: PullRequestReview,
     reason: ReviewExclusionReason,
+    coAttributionCandidate?: ReviewCoAttributionCandidate,
   ): void => {
     reviewExclusions.push({
       id: `${pullRequest.id}:review-exclusion:${review.id}`,
@@ -2692,6 +2695,7 @@ export function createLeaderboardSnapshot(
       repository: repositoryIdFromUrl(pullRequest.url),
       url: review.url,
       reason,
+      ...(coAttributionCandidate ? { coAttributionCandidate } : {}),
     });
   };
   const scoredAttributionSources = new Map<string, GitHubTextSource>();
@@ -3424,24 +3428,54 @@ export function createLeaderboardSnapshot(
         excludeReview(pullRequest, review, "unchanged-outcome");
       }
     }
-    // SCR-05: the pull request's one review award goes to the latest request
-    // for changes that the merged code answered. The cap is one third per pull
-    // request, but attribution is recorded separately: another actor who found
-    // the same unresolved blocker keeps a co-attribution record instead of
-    // being erased by the latest-timestamp tie-breaker, while a repeat by the
-    // already-awarded actor stays deduplicated as one lifecycle.
-    const outcomeReview = outcomeReviews.at(-1);
+    // SCR-05: the pull request's one review award goes to the earliest
+    // substantive request for changes that the merged code answered. Using
+    // the latest timestamp here would let a late restatement displace the
+    // reviewer who found and followed the blocker earlier, making timing near
+    // merge outweigh discovery or sustained verification. The cap is one third
+    // per pull request, but attribution is recorded separately: another actor
+    // who independently found the same unresolved blocker keeps a co-attribution
+    // record instead of being erased, while a repeat by the already-awarded
+    // actor stays deduplicated as one lifecycle.
+    //
+    // When several reviewers independently answered the blocker, the displaced
+    // reviewers are published as a bounded shared-credit candidate: the
+    // selected recipient, the ordering reason, the displaced review IDs, and
+    // the automatic award are all exposed so a maintainer can later ratify
+    // explicit integer-third shares without the selection being opaque.
+    const outcomeReview = outcomeReviews[0];
+    const coAttributed = outcomeReviews.filter(
+      (review) =>
+        review !== outcomeReview &&
+        !(outcomeReview?.author && review.author?.id === outcomeReview.author.id),
+    );
+    const coAttributionCandidate: ReviewCoAttributionCandidate | undefined =
+      outcomeReview && coAttributed.length > 0
+        ? {
+            candidateReviewIds: outcomeReviews.map((review) => review.id),
+            selectedReviewId: outcomeReview.id,
+            displacedReviewIds: coAttributed.map((review) => review.id),
+            orderingReason:
+              "Qualifying requests for changes the merged code answered, ordered by submission time; the earliest reviewer who found the blocker receives the single automatic award and the others remain co-attributed candidates for maintainer ratification.",
+            automaticAwardScoreThirds: 1,
+          }
+        : undefined;
     for (const review of outcomeReviews) {
       if (review === outcomeReview) {
         awardReview(
           review,
           true,
-          "Latest pre-merge request for changes that the merged code answered; one review award per pull request.",
+          "Earliest pre-merge request for changes that the merged code answered; one review award per pull request.",
         );
       } else if (outcomeReview?.author && review.author?.id === outcomeReview.author.id) {
         excludeReview(pullRequest, review, "pull-request-review-awarded");
       } else {
-        excludeReview(pullRequest, review, "co-attributed-review-award");
+        excludeReview(
+          pullRequest,
+          review,
+          "co-attributed-review-award",
+          coAttributionCandidate,
+        );
       }
     }
     // Preserve the later verification without another award or evidence bonus.
@@ -4138,6 +4172,50 @@ function assertMethodologyValue(value: unknown, path: string): void {
   assertString(methodology.collectionPolicy, `${path}.collectionPolicy`);
 }
 
+function assertCoAttributionCandidate(
+  value: unknown,
+  path: string,
+  reason: string,
+): void {
+  const candidate = assertObject(value, path);
+  const expectedKeys = [
+    "automaticAwardScoreThirds",
+    "candidateReviewIds",
+    "displacedReviewIds",
+    "orderingReason",
+    "selectedReviewId",
+  ];
+  for (const key of expectedKeys) {
+    if (!(key in candidate)) {
+      throw new Error(`${path} must contain exactly the co-attribution candidate fields`);
+    }
+  }
+  if (reason !== "co-attributed-review-award") {
+    throw new Error(
+      `${path} is only valid when the exclusion reason is co-attributed-review-award`,
+    );
+  }
+  const candidateIds = assertStringArray(candidate.candidateReviewIds, `${path}.candidateReviewIds`);
+  const displacedIds = assertStringArray(candidate.displacedReviewIds, `${path}.displacedReviewIds`);
+  assertString(candidate.selectedReviewId, `${path}.selectedReviewId`);
+  assertString(candidate.orderingReason, `${path}.orderingReason`);
+  if (candidate.automaticAwardScoreThirds !== 1) {
+    throw new Error(`${path}.automaticAwardScoreThirds must be 1`);
+  }
+  const selectedId = candidate.selectedReviewId as string;
+  if (!candidateIds.includes(selectedId)) {
+    throw new Error(`${path}.selectedReviewId must be one of candidateReviewIds`);
+  }
+  for (const id of displacedIds) {
+    if (!candidateIds.includes(id)) {
+      throw new Error(`${path}.displacedReviewIds must be a subset of candidateReviewIds`);
+    }
+    if (id === selectedId) {
+      throw new Error(`${path}.displacedReviewIds must not include the selected review`);
+    }
+  }
+}
+
 function assertReviewExclusionValue(
   value: unknown,
   path: string,
@@ -4153,11 +4231,25 @@ function assertReviewExclusionValue(
     "reviewId",
     "url",
   ];
-  if (
-    JSON.stringify(Object.keys(exclusion).sort()) !==
-    JSON.stringify(expectedKeys)
-  ) {
+  const optionalKeys = ["coAttributionCandidate"];
+  const exclusionKeys = Object.keys(exclusion);
+  const hasUnexpectedKey = exclusionKeys.some(
+    (key) => !expectedKeys.includes(key) && !optionalKeys.includes(key),
+  );
+  if (hasUnexpectedKey) {
     throw new Error(`${path} must contain exactly the review exclusion fields`);
+  }
+  for (const key of expectedKeys) {
+    if (!exclusionKeys.includes(key)) {
+      throw new Error(`${path} must contain exactly the review exclusion fields`);
+    }
+  }
+  if (exclusion.coAttributionCandidate !== undefined) {
+    assertCoAttributionCandidate(
+      exclusion.coAttributionCandidate,
+      `${path}.coAttributionCandidate`,
+      exclusion.reason as string,
+    );
   }
   assertString(exclusion.id, `${path}.id`);
   assertString(exclusion.pullRequestId, `${path}.pullRequestId`);
